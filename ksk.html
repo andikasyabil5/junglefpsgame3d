@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Jungle FPS - Fixed Movement</title>
+    
+    <script src="https://aframe.io/releases/1.4.2/aframe.min.js"></script>
+    <script src="https://unpkg.com/aframe-environment-component@1.3.3/dist/aframe-environment-component.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/nipplejs/0.10.1/nipplejs.min.js"></script>
+
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: sans-serif; user-select: none; }
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 10; }
+        
+        .screen { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,20,0,0.9); 
+                  display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: auto; z-index: 20; color: white; }
+        .hidden { display: none !important; }
+        
+        #hud { width: 100%; height: 100%; display: none; position: relative; }
+        #minimap-container { position: absolute; top: 15px; left: 15px; width: 120px; height: 120px; 
+                             background: rgba(0,0,0,0.5); border: 2px solid #4ade80; border-radius: 50%; overflow: hidden; }
+        #minimap { width: 100%; height: 100%; }
+        
+        #stats { position: absolute; top: 15px; right: 15px; text-align: right; }
+        #health-bar-container { width: 150px; height: 15px; background: #333; border: 1px solid #fff; margin-top: 5px; }
+        #health-bar { width: 100%; height: 100%; background: #22c55e; transition: width 0.3s; }
+        
+        #crosshair { position: absolute; top: 50%; left: 50%; width: 20px; height: 20px; 
+                     margin: -10px 0 0 -10px; border: 2px solid rgba(255,255,255,0.5); border-radius: 50%; }
+        
+        #joystick-zone { position: absolute; bottom: 40px; left: 40px; width: 120px; height: 120px; pointer-events: auto; }
+        #shoot-button { position: absolute; bottom: 40px; right: 40px; width: 80px; height: 80px; 
+                        background: rgba(255,0,0,0.5); border-radius: 50%; border: 2px solid white; pointer-events: auto; }
+        
+        #vignette { position: absolute; top: 0; left: 0; width: 100%; height: 100%; 
+                    box-shadow: inset 0 0 100px rgba(255,0,0,0); transition: box-shadow 0.1s; pointer-events: none; }
+        
+        button { padding: 15px 30px; font-size: 1.2rem; background: #22c55e; color: white; border: none; cursor: pointer; border-radius: 5px; }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div id="vignette"></div>
+
+        <div id="start-screen" class="screen">
+            <h1>JUNGLE FPS</h1>
+            <p>Move: Left Stick | Shoot: Right Button</p>
+            <button onclick="startGame()">START GAME</button>
+        </div>
+
+        <div id="game-over-screen" class="screen hidden">
+            <h1>GAME OVER</h1>
+            <p id="final-score">Score: 0</p>
+            <button onclick="location.reload()">RETRY</button>
+        </div>
+
+        <div id="hud">
+            <div id="minimap-container"><canvas id="minimap" width="120" height="120"></canvas></div>
+            <div id="stats">
+                <div id="score">Score: 0</div>
+                <div id="health-bar-container"><div id="health-bar"></div></div>
+            </div>
+            <div id="crosshair"></div>
+            <div id="joystick-zone"></div>
+            <div id="shoot-button"></div>
+        </div>
+    </div>
+
+    <a-scene loading-screen="enabled: false" renderer="antialias: true">
+        <a-entity environment="preset: forest; fog: 0; dressingAmount: 300;"></a-entity>
+
+        <a-entity id="player" position="0 0 0">
+            <a-entity id="camera" camera fov="90" look-controls position="0 1.6 0">
+                <a-entity id="raycaster" raycaster="objects: .enemy; far: 50"></a-entity>
+                
+                <a-entity id="gun" position="0.3 -0.3 -0.5">
+                    <a-box width="0.1" height="0.15" depth="0.5" color="#222"></a-box>
+                    <a-entity id="muzzle-flash" position="0 0 -0.3" visible="false">
+                        <a-sphere radius="0.1" color="yellow"></a-sphere>
+                    </a-entity>
+                </a-entity>
+            </a-camera>
+        </a-entity>
+
+        <a-entity id="enemy-container"></a-entity>
+        
+        <a-box position="-5 1 -10" width="2" height="2" depth="2" color="#4b3621"></a-box>
+        <a-box position="8 1.5 -15" width="3" height="3" depth="3" color="#4b3621"></a-box>
+    </a-scene>
+
+    <script>
+        let score = 0, health = 100, gameState = 'start', enemies = [];
+        let moveVector = { x: 0, y: 0 };
+        
+        const player = document.querySelector('#player');
+        const camera = document.querySelector('#camera');
+        const enemyContainer = document.querySelector('#enemy-container');
+
+        // --- FIXED MOVEMENT COMPONENT ---
+        AFRAME.registerComponent('joystick-controller', {
+            tick: function() {
+                if (gameState !== 'playing' || (moveVector.x === 0 && moveVector.y === 0)) return;
+                
+                const rotation = camera.object3D.rotation.y;
+                const speed = 0.12;
+                
+                // Vector math to move relative to camera direction
+                let dx = moveVector.x * Math.cos(rotation) - moveVector.y * Math.sin(rotation);
+                let dz = moveVector.x * Math.sin(rotation) + moveVector.y * Math.cos(rotation);
+                
+                player.object3D.position.x += dx * speed;
+                player.object3D.position.z += dz * speed;
+            }
+        });
+        player.setAttribute('joystick-controller', '');
+
+        // --- ENEMY LOGIC ---
+        function spawnEnemy() {
+            if (gameState !== 'playing') return;
+            const enemy = document.createElement('a-entity');
+            const angle = Math.random() * Math.PI * 2;
+            const dist = 15 + Math.random() * 5;
+            const x = player.object3D.position.x + Math.cos(angle) * dist;
+            const z = player.object3D.position.z + Math.sin(angle) * dist;
+
+            enemy.setAttribute('geometry', 'primitive: box; width: 0.8; height: 1.8; depth: 0.8');
+            enemy.setAttribute('material', 'color: red');
+            enemy.setAttribute('position', {x: x, y: 0.9, z: z});
+            enemy.setAttribute('class', 'enemy');
+            
+            enemy.tick = () => {
+                const dir = new THREE.Vector3().copy(player.object3D.position).sub(enemy.object3D.position).normalize();
+                enemy.object3D.position.addScaledVector(dir, 0.03); // Slow speed for Easy Mode
+                if (enemy.object3D.position.distanceTo(player.object3D.position) < 1.5) {
+                    damagePlayer(0.5); // Low damage
+                }
+            };
+            
+            enemyContainer.appendChild(enemy);
+            enemies.push(enemy);
+            setTimeout(spawnEnemy, 4000);
+        }
+
+        // --- CORE SYSTEMS ---
+        function startGame() {
+            gameState = 'playing';
+            document.getElementById('start-screen').classList.add('hidden');
+            document.getElementById('hud').style.display = 'block';
+            spawnEnemy();
+            animate();
+        }
+
+        function damagePlayer(amt) {
+            health -= amt;
+            document.getElementById('health-bar').style.width = health + '%';
+            document.getElementById('vignette').style.boxShadow = 'inset 0 0 100px rgba(255,0,0,0.5)';
+            setTimeout(() => { document.getElementById('vignette').style.boxShadow = 'none'; }, 100);
+            if (health <= 0) endGame();
+        }
+
+        function shoot() {
+            if (gameState !== 'playing') return;
+            
+            // Muzzle flash & Recoil
+            const flash = document.getElementById('muzzle-flash');
+            flash.setAttribute('visible', 'true');
+            setTimeout(() => flash.setAttribute('visible', 'false'), 50);
+
+            const ray = document.querySelector('#raycaster').components.raycaster;
+            const hits = ray.intersections;
+            if (hits.length > 0) {
+                const target = hits[0].object.el;
+                target.parentNode.removeChild(target);
+                enemies = enemies.filter(e => e !== target);
+                score += 10;
+                document.getElementById('score').innerText = "Score: " + score;
+            }
+        }
+
+        function endGame() {
+            gameState = 'over';
+            document.getElementById('hud').style.display = 'none';
+            document.getElementById('game-over-screen').classList.remove('hidden');
+            document.getElementById('final-score').innerText = "Score: " + score;
+        }
+
+        function animate() {
+            if (gameState === 'playing') {
+                enemies.forEach(e => e.tick());
+                drawMinimap();
+            }
+            requestAnimationFrame(animate);
+        }
+
+        // --- INPUTS ---
+        const manager = nipplejs.create({ zone: document.getElementById('joystick-zone'), color: 'white' });
+        manager.on('move', (evt, data) => {
+            moveVector.x = Math.cos(data.angle.radian) * (data.distance / 50);
+            moveVector.y = -Math.sin(data.angle.radian) * (data.distance / 50);
+        });
+        manager.on('end', () => { moveVector = { x: 0, y: 0 }; });
+        
+        document.getElementById('shoot-button').addEventListener('touchstart', (e) => { e.preventDefault(); shoot(); });
+        document.getElementById('shoot-button').addEventListener('mousedown', shoot);
+
+        // --- MINIMAP ---
+        const canvas = document.getElementById('minimap');
+        const ctx = canvas.getContext('2d');
+        function drawMinimap() {
+            ctx.clearRect(0, 0, 120, 120);
+            ctx.fillStyle = '#4ade80';
+            ctx.beginPath(); ctx.arc(60, 60, 3, 0, 7); ctx.fill(); // Player
+            
+            ctx.fillStyle = 'red';
+            enemies.forEach(e => {
+                const relX = (e.object3D.position.x - player.object3D.position.x) * 4 + 60;
+                const relZ = (e.object3D.position.z - player.object3D.position.z) * 4 + 60;
+                ctx.beginPath(); ctx.arc(relX, relZ, 2, 0, 7); ctx.fill();
+            });
+        }
+    </script>
+</body>
+</html>
+</div>
+
+        <!-- DIFFICULTY SELECTOR -->
+        <div class="difficulty-container">
+            <button class="difficulty-btn easy active" onclick="setDifficulty('easy')">✨ EASY</button>
+            <button class="difficulty-btn medium" onclick="setDifficulty('medium')">⚡ MEDIUM</button>
+            <button class="difficulty-btn hard" onclick="setDifficulty('hard')">🔥 HARD</button>
+        </div>
+
+        <!-- STATS BAR -->
+        <div class="stats-bar">
+            <div class="stat-card">
+                <div class="stat-value" id="scoreDisplay">0</div>
+                <div class="stat-label">SCORE</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="totalDisplay">0</div>
+                <div class="stat-label">TOTAL</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="streakDisplay">0</div>
+                <div class="stat-label">STREAK</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="accuracyDisplay">0%</div>
+                <div class="stat-label">ACCURACY</div>
+            </div>
+        </div>
+
+        <!-- PROGRESS BAR -->
+        <div class="progress-container">
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill" style="width: 0%"></div>
+            </div>
+            <div class="progress-text" id="progressText">0/10 questions</div>
+        </div>
+
+        <!-- GAME AREA -->
+        <div class="game-area">
+            <div class="question-box">
+                <div class="question-label">🔍 TEKS APA INI?</div>
+                <div class="font-display">
+                    <div id="questionText">DEMOX</div>
+                </div>
+                <div class="hint-box" id="hintBox">
+                    💡 Hint: Teks ini menggunakan font yang unik...
+                </div>
+            </div>
+
+            <!-- OPTIONS -->
+            <div class="options-grid" id="optionsGrid">
+                <!-- Options akan diisi JavaScript -->
+            </div>
+
+            <!-- CONTROL BUTTONS -->
+            <div class="control-buttons">
+                <button class="control-btn" onclick="nextQuestion()">⏭️ NEXT</button>
+                <button class="control-btn" onclick="showAnswer()">🔍 SHOW ANSWER</button>
+                <button class="control-btn primary" onclick="newGame()">🔄 NEW GAME</button>
+            </div>
+        </div>
+
+        <!-- FONT SHOWCASE -->
+        <div class="font-showcase">
+            <div class="showcase-title">🎨 FONT COLLECTION</div>
+            <div class="font-list" id="fontShowcase"></div>
+        </div>
+
+        <!-- FOOTER -->
+        <div class="footer">
+            <div class="emoji-wall">
+                🥶🤬😡😠😤👿😈👹👺🤖☠️💀👻👽👾🖕
+            </div>
+            <p>🔥 DEMOX FONT QUIZ - Test your font recognition skills! 🔥</p>
+        </div>
+    </div>
+
+    <!-- MODAL -->
+    <div class="modal-overlay" id="resultModal">
+        <div class="modal">
+            <div class="modal-icon">🏆</div>
+            <div class="modal-title" id="modalTitle">QUIZ COMPLETE!</div>
+            <div class="modal-text" id="modalText">Great job!</div>
+            <div class="modal-stats" id="modalStats"></div>
+            <button class="modal-btn" onclick="closeModal()">PLAY AGAIN</button>
+        </div>
+    </div>
+
+    <script>
+        // ==================== FONT DATABASE ====================
+        const fontDatabase = [
+            // EASY - Font umum
+            { name: 'Arial', font: 'Arial, sans-serif', text: 'Hello World', difficulty: 'easy' },
+            { name: 'Times New Roman', font: 'Times New Roman, serif', text: 'The quick brown fox', difficulty: 'easy' },
+            { name: 'Courier New', font: 'Courier New, monospace', text: '1234567890', difficulty: 'easy' },
+            { name: 'Georgia', font: 'Georgia, serif', text: 'Georgia Text', difficulty: 'easy' },
+            { name: 'Verdana', font: 'Verdana, sans-serif', text: 'Verdana Sample', difficulty: 'easy' },
+            { name: 'Comic Sans MS', font: 'Comic Sans MS, cursive', text: 'Funny Text', difficulty: 'easy' },
+            { name: 'Impact', font: 'Impact, sans-serif', text: 'IMPACT TEXT', difficulty: 'easy' },
+            { name: 'Trebuchet MS', font: 'Trebuchet MS, sans-serif', text: 'Trebuchet Style', difficulty: 'easy' },
+            { name: 'Palatino', font: 'Palatino, serif', text: 'Palatino Font', difficulty: 'easy' },
+            { name: 'Garamond', font: 'Garamond, serif', text: 'Garamond Style', difficulty: 'easy' },
+            
+            // MEDIUM - Font lebih bervariasi
+            { name: 'Helvetica', font: 'Helvetica, Arial, sans-serif', text: 'Helvetica World', difficulty: 'medium' },
+            { name: 'Futura', font: 'Futura, sans-serif', text: 'Futura Design', difficulty: 'medium' },
+            { name: 'Baskerville', font: 'Baskerville, serif', text: 'Baskerville Classic', difficulty: 'medium' },
+            { name: 'Gill Sans', font: 'Gill Sans, sans-serif', text: 'Gill Sans Style', difficulty: 'medium' },
+            { name: 'Rockwell', font: 'Rockwell, serif', text: 'Rockwell Bold', difficulty: 'medium' },
+            { name: 'Century Gothic', font: 'Century Gothic, sans-serif', text: 'Century Modern', difficulty: 'medium' },
+            { name: 'Book Antiqua', font: 'Book Antiqua, serif', text: 'Book Antiqua', difficulty: 'medium' },
+            { name: 'Copperplate', font: 'Copperplate, fantasy', text: 'COPPERPLATE', difficulty: 'medium' },
+            { name: 'Lucida Console', font: 'Lucida Console, monospace', text: 'Lucida Code', difficulty: 'medium' },
+            { name: 'Brush Script MT', font: 'Brush Script MT, cursive', text: 'Brush Script', difficulty: 'medium' },
+            
+            // HARD - Font unik dan panjang
+            { name: 'Didot', font: 'Didot, serif', text: 'Didot Elegant and Very Long Text Example', difficulty: 'hard' },
+            { name: 'Bodoni', font: 'Bodoni, serif', text: 'Bodoni Classic Font Style with Extra Words', difficulty: 'hard' },
+            { name: 'Franklin Gothic', font: 'Franklin Gothic, sans-serif', text: 'Franklin Gothic Heavy Font Design', difficulty: 'hard' },
+            { name: 'Optima', font: 'Optima, sans-serif', text: 'Optima Humanist Sans Serif Font', difficulty: 'hard' },
+            { name: 'Perpetua', font: 'Perpetua, serif', text: 'Perpetua Serif Font with Long Description', difficulty: 'hard' },
+            { name: 'Candara', font: 'Candara, sans-serif', text: 'Candara Modern Sans Font Example Text', difficulty: 'hard' },
+            { name: 'Consolas', font: 'Consolas, monospace', text: 'Consolas Monospace Programming Font', difficulty: 'hard' },
+            { name: 'Corbel', font: 'Corbel, sans-serif', text: 'Corbel Sans Serif Font Family Design', difficulty: 'hard' },
+            { name: 'Calibri', font: 'Calibri, sans-serif', text: 'Calibri Default Microsoft Office Font', difficulty: 'hard' },
+            { name: 'Cambria', font: 'Cambria, serif', text: 'Cambria Serif Font for Long Text Samples', difficulty: 'hard' },
+            { name: 'Ebrima', font: 'Ebrima, sans-serif', text: 'Ebrima Unicode Font Support Example', difficulty: 'hard' },
+            { name: 'Gabriola', font: 'Gabriola, cursive', text: 'Gabriola Fancy Calligraphic Font Style', difficulty: 'hard' },
+            { name: 'Javanese Text', font: 'Javanese Text, sans-serif', text: 'Javanese Text Font Support Unicode', difficulty: 'hard' },
+            { name: 'Leelawadee', font: 'Leelawadee, sans-serif', text: 'Leelawadee Thai Font Support Text', difficulty: 'hard' },
+            { name: 'Malgun Gothic', font: 'Malgun Gothic, sans-serif', text: 'Malgun Korean Font Style Example', difficulty: 'hard' },
+            { name: 'Microsoft YaHei', font: 'Microsoft YaHei, sans-serif', text: 'Microsoft YaHei Chinese Font Support', difficulty: 'hard' },
+            { name: 'Segoe UI', font: 'Segoe UI, sans-serif', text: 'Segoe UI Windows Default Font Family', difficulty: 'hard' },
+            { name: 'Sylfaen', font: 'Sylfaen, serif', text: 'Sylfaen Armenian Script Font Design', difficulty: 'hard' },
+            { name: 'Traditional Arabic', font: 'Traditional Arabic, serif', text: 'Arabic Script Font Support Example', difficulty: 'hard' },
+            { name: 'Yu Gothic', font: 'Yu Gothic, sans-serif', text: 'Yu Gothic Japanese Font Style Design', difficulty: 'hard' }
+        ];
+
+        // ==================== GAME STATE ====================
+        let currentDifficulty = 'easy';
+        let currentQuestions = [];
+        let currentQuestionIndex = 0;
+        let score = 0;
+        let totalAnswered = 0;
+        let correctAnswers = 0;
+        let streak = 0;
+        let maxStreak = 0;
+        let answered = false;
+        let gameComplete = false;
+
+        // ==================== FUNCTIONS ====================
+        function setDifficulty(difficulty) {
+            currentDifficulty = difficulty;
+            document.querySelectorAll('.difficulty-btn').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+            newGame();
+        }
+
+        function newGame() {
+            // Filter questions based on difficulty
+            currentQuestions = fontDatabase.filter(q => q.difficulty === currentDifficulty);
+            
+            // Shuffle questions
+            currentQuestions = shuffleArray(currentQuestions);
+            
+            // Limit to 10 questions
+            currentQuestions = currentQuestions.slice(0, 10);
+            
+            currentQuestionIndex = 0;
+            score = 0;
+            totalAnswered = 0;
+            correctAnswers = 0;
+            streak = 0;
+            maxStreak = 0;
+            answered = false;
+            gameComplete = false;
+            
+            updateStats();
+            loadQuestion();
+            updateFontShowcase();
+        }
+
+        function shuffleArray(array) {
+            for (let i = array.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [array[i], array[j]] = [array[j], array[i]];
+            }
+            return array;
+        }
+
+        function loadQuestion() {
+            if (currentQuestionIndex >= currentQuestions.length) {
+                gameComplete = true;
+                showResult();
+                return;
+            }
+
+            const question = currentQuestions[currentQuestionIndex];
+            document.getElementById('questionText').style.fontFamily = question.font;
+            document.getElementById('questionText').innerText = question.text;
+            
+            // Update hint
+            document.getElementById('hintBox').innerHTML = `💡 Hint: Teks ini menggunakan font <strong>${question.name}</strong> style...`;
+            
+            // Generate options
+            generateOptions(question);
+            
+            answered = false;
+            updateProgress();
+        }
+
+        function generateOptions(correctQuestion) {
+            const optionsGrid = document.getElementById('optionsGrid');
+            
+            // Get random wrong options from same difficulty
+            let wrongOptions = fontDatabase
+                .filter(q => q.difficulty === currentDifficulty && q.name !== correctQuestion.name)
+                .map(q => q.name);
+            
+            wrongOptions = [...new Set(wrongOptions)]; // Remove duplicates
+            wrongOptions = shuffleArray(wrongOptions).slice(0, 3);
+            
+            // Combine correct + wrong
+            let options = [correctQuestion.name, ...wrongOptions];
+            options = shuffleArray(options);
+            
+            // Create HTML
+            optionsGrid.innerHTML = '';
+            options.forEach(option => {
+                const btn = document.createElement('div');
+                btn.className = 'option-btn';
+                btn.innerText = option;
+                btn.onclick = () => checkAnswer(option, correctQuestion.name, btn);
+                optionsGrid.appendChild(btn);
+            });
+        }
+
+        function checkAnswer(selected, correct, element) {
+            if (answered || gameComplete) return;
+            
+            answered = true;
+            totalAnswered++;
+            
+            const buttons = document.querySelectorAll('.option-btn');
+            
+            if (selected === correct) {
+                // Correct answer
+                element.classList.add('correct');
+                score += 10;
+                correctAnswers++;
+                streak++;
+                if (streak > maxStreak) maxStreak = streak;
+                
+                // Highlight correct answer
+                buttons.forEach(btn => {
+                    if (btn.innerText === correct) {
+                        btn.classList.add('correct');
+                    }
+                    btn.classList.add('disabled');
+                });
+            } else {
+                // Wrong answer
+                element.classList.add('wrong');
+                streak = 0;
+                
+                // Highlight correct answer
+                buttons.forEach(btn => {
+                    if (btn.innerText === correct) {
+                        btn.classList.add('correct');
+                    }
+                    btn.classList.add('disabled');
+                });
+            }
+            
+            updateStats();
+        }
+
+        function nextQuestion() {
+            if (gameComplete) return;
+            
+            currentQuestionIndex++;
+            loadQuestion();
+        }
+
+        function showAnswer() {
+            if (answered || gameComplete) return;
+            
+            const correct = currentQuestions[currentQuestionIndex].name;
+            const buttons = document.querySelectorAll('.option-btn');
+            
+            buttons.forEach(btn => {
+                if (btn.innerText === correct) {
+                    btn.classList.add('correct');
+                }
+                btn.classList.add('disabled');
+            });
+            
+            answered = true;
+            totalAnswered++;
+            streak = 0;
+            updateStats();
+        }
+
+        function updateStats() {
+            document.getElementById('scoreDisplay').innerText = score;
+            document.getElementById('totalDisplay').innerText = totalAnswered;
+            document.getElementById('streakDisplay').innerText = streak;
+            
+            let accuracy = totalAnswered > 0 ? Math.round((correctAnswers / totalAnswered) * 100) : 0;
+            document.getElementById('accuracyDisplay').innerText = accuracy + '%';
+        }
+
+        function updateProgress() {
+            const progress = ((currentQuestionIndex) / currentQuestions.length) * 100;
+            document.getElementById('progressFill').style.width = progress + '%';
+            document.getElementById('progressText').innerText = `${currentQuestionIndex}/${currentQuestions.length} questions`;
+        }
+
+        function showResult() {
+            const modal = document.getElementById('resultModal');
+            const modalTitle = document.getElementById('modalTitle');
+            const modalText = document.getElementById('modalText');
+            const modalStats = document.getElementById('modalStats');
+            
+            let message = '';
+            let accuracy = totalAnswered > 0 ? Math.round((correctAnswers / totalAnswered) * 100) : 0;
+            
+            if (accuracy >= 90) {
+                message = '🌟 FONT MASTER!';
+            } else if (accuracy >= 70) {
+                message = '✨ GOOD JOB!';
+            } else if (accuracy >= 50) {
+                message = '👍 KEEP PRACTICING!';
+            } else {
+                message = '💪 TRY AGAIN!';
+            }
+            
+            modalTitle.innerText = 'QUIZ COMPLETE!';
+            modalText.innerText = message;
+            modalStats.innerHTML = `
+                <div style="margin:10px 0"><strong>Score:</strong> ${score}</div>
+                <div style="margin:10px 0"><strong>Correct:</strong> ${correctAnswers}/${totalAnswered}</div>
+                <div style="margin:10px 0"><strong>Accuracy:</strong> ${accuracy}%</div>
+                <div style="margin:10px 0"><strong>Max Streak:</strong> ${maxStreak}</div>
+            `;
+            
+            modal.classList.add('show');
+        }
+
+        function closeModal() {
+            document.getElementById('resultModal').classList.remove('show');
+            newGame();
+        }
+
+        function updateFontShowcase() {
+            const showcase = document.getElementById('fontShowcase');
+            const fonts = fontDatabase.filter(f => f.difficulty === currentDifficulty).slice(0, 8);
+            
+            showcase.innerHTML = fonts.map(f => `
+                <div class="font-sample">
+                    <span style="font-family: ${f.font}">${f.text.substring(0, 10)}...</span>
+                    <p>${f.name}</p>
+                </div>
+            `).join('');
+        }
+
+        // Initialize game
+        newGame();
+
+        console.log('%c🔤 DEMOX FONT QUIZ 🔤', 'font-size: 25px; color: #667eea;');
+        console.log('%c🎯 Easy • Medium • Hard • Varying text length', 'font-size: 14px; color: #764ba2;');
+    </script>
+</body>
+</html>
